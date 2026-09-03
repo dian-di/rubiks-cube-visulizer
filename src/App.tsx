@@ -8,7 +8,17 @@ import { Button } from '@/components/ui/button'
 declare module 'react' {
   namespace JSX {
     interface IntrinsicElements {
-      'twisty-player': DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>
+      'twisty-player': DetailedHTMLProps<
+        HTMLAttributes<HTMLElement> & {
+          alg?: string
+          controlPanel?: string
+          background?: string
+          tempoScale?: number
+          cameraLatitude?: number
+          cameraLongitude?: number
+        },
+        HTMLElement
+      >
     }
   }
 }
@@ -40,11 +50,12 @@ interface AnimState {
 }
 
 // ---------------------------------------------------------------- geometry
-// 同心圆布局：Y 组在上方，X/Z 组在下排左右。三个半径对应层坐标 -1/0/+1。
+// 同心圆布局：Y 组在上方，X 组在右下、Z 组在左下。三个半径对应层坐标 -1/0/+1。
+// 注意：X/Z 与下排左右组的对应关系决定 Y 圆周上四个色簇的相位（蓝红绿橙，顺时针）。
 const CENTERS: readonly [Pt, Pt, Pt] = [
-  { x: 165, y: 290 }, // X
+  { x: 335, y: 290 }, // X
   { x: 250, y: 170 }, // Y
-  { x: 335, y: 290 }, // Z
+  { x: 165, y: 290 }, // Z
 ]
 const RADII = [100, 124, 148]
 const R = (v: number) => RADII[v + 1]
@@ -81,7 +92,9 @@ function place(s: Sticker): Pt | null {
     pick = ny > 0 ? (p) => -p.y : (p) => p.y
   } else {
     pts = circleIntersect(CENTERS[0], R(x), CENTERS[1], R(y))
-    pick = nz > 0 ? (p) => p.x : (p) => -p.x
+    // X 组在右下后，+Z（绿）取靠左下的交点、−Z（蓝）取靠右上的交点，
+    // 使 Y 圆周顺时针色序为 蓝红绿橙（各面较此前前进一位）。
+    pick = nz > 0 ? (p) => -p.x : (p) => p.x
   }
   if (!pts) return null
   return pick(pts[0]) > pick(pts[1]) ? pts[0] : pts[1]
@@ -90,22 +103,29 @@ function place(s: Sticker): Pt | null {
 // ---------------------------------------------------------------- cube model
 
 export enum PGColors {
-  White = "#ffffff",
-  Orange = "#ff8000",
-  Green = "#44ee00",
-  Red = "#ff0000",
-  Blue = "#2266ff",
-  Yellow = "#f4f400"
+  White = '#ffffff',
+  Orange = '#ff8000',
+  Green = '#44ee00',
+  Red = '#ff0000',
+  Blue = '#2266ff',
+  Yellow = '#f4f400',
 }
 
-const FACE_COLORS = [PGColors.White, PGColors.Orange, PGColors.Green, PGColors.Red, PGColors.Blue, PGColors.Yellow]
+const FACE_COLORS = [
+  PGColors.White, // U / +Y
+  PGColors.Yellow, // D / -Y
+  PGColors.Red, // R / +X
+  PGColors.Orange, // L / -X
+  PGColors.Green, // F / +Z
+  PGColors.Blue, // B / -Z
+]
 const FACE_NORMALS: readonly V3[] = [
-  [0, 1, 0],
-  [0, -1, 0],
-  [1, 0, 0],
-  [-1, 0, 0],
-  [0, 0, 1],
-  [0, 0, -1],
+  [0, 1, 0], // U
+  [0, -1, 0], // D
+  [1, 0, 0], // R
+  [-1, 0, 0], // L
+  [0, 0, 1], // F
+  [0, 0, -1], // B
 ]
 
 function initStickers(): Sticker[] {
@@ -137,13 +157,10 @@ function rotVec(v: V3, axis: Axis, deg: number): V3 {
   return [x * c - y * s, x * s + y * c, z]
 }
 
-
-
 // 外层记号	对应中层记号	说明
 // L / R	M	Middle 层，方向与 L 一致
 // U / D	E	Equator 层，方向与 D 一致
 // F / B	S	Standing 层，方向与 F 一致
-// TODO: M, E, S 待实现
 const FACE_MOVES: Record<string, { axis: Axis; layer: number; theta: number }> = {
   U: { axis: 1, layer: 1, theta: -90 },
   D: { axis: 1, layer: -1, theta: 90 },
@@ -151,6 +168,10 @@ const FACE_MOVES: Record<string, { axis: Axis; layer: number; theta: number }> =
   L: { axis: 0, layer: -1, theta: 90 },
   F: { axis: 2, layer: 1, theta: -90 },
   B: { axis: 2, layer: -1, theta: 90 },
+  // 中层：M 同 L 方向（x=0），E 同 D 方向（y=0），S 同 F 方向（z=0）
+  M: { axis: 0, layer: 0, theta: 90 },
+  E: { axis: 1, layer: 0, theta: 90 },
+  S: { axis: 2, layer: 0, theta: -90 },
 }
 
 const FACE_KEYS = Object.keys(FACE_MOVES)
@@ -163,7 +184,7 @@ const TAU = Math.PI * 2
 function directedCircleAngle(theta0: number, theta1: number, direction: number): number {
   // atan2 在 -π/π 处断开。先取得最短的几何弧，再把它展开到本次转动的统一方向；
   // 这样同一圆周上的 dot 不会仅因跨越分支而反向。
-  let delta = ((theta1 - theta0 + Math.PI) % TAU + TAU) % TAU - Math.PI
+  let delta = ((((theta1 - theta0 + Math.PI) % TAU) + TAU) % TAU) - Math.PI
   if (Math.abs(delta) < 1e-9) return theta0
   if (delta * direction < 0) delta += direction * TAU
   return theta0 + delta
@@ -260,17 +281,20 @@ export default function App() {
     }
     return playerReadyRef.current as Promise<unknown>
   }, [])
-  const syncPlayerMove = useCallback((face: string) => {
-    void getPlayerReady().then(() => {
-      const p = playerRef.current as any
-      if (!p || typeof p.experimentalAddMove !== 'function') return
-      try {
-        p.experimentalAddMove(face)
-      } catch {
-        // ignore
-      }
-    })
-  }, [getPlayerReady])
+  const syncPlayerMove = useCallback(
+    (face: string) => {
+      void getPlayerReady().then(() => {
+        const p = playerRef.current as any
+        if (!p || typeof p.experimentalAddMove !== 'function') return
+        try {
+          p.experimentalAddMove(face)
+        } catch {
+          // ignore
+        }
+      })
+    },
+    [getPlayerReady],
+  )
   const clearPlayerAlg = useCallback(() => {
     void getPlayerReady().then(() => {
       const p = playerRef.current as any
@@ -319,7 +343,8 @@ export default function App() {
         theta0,
         r0,
         // 半径不变才是同一个圆周上的 dot；螺旋运动保持其原本的几何落点插值。
-        theta1: Math.abs(r0 - r1) < 1e-6 ? directedCircleAngle(theta0, theta1, screenDirection) : theta1,
+        theta1:
+          Math.abs(r0 - r1) < 1e-6 ? directedCircleAngle(theta0, theta1, screenDirection) : theta1,
         r1,
       })
     }
@@ -451,33 +476,33 @@ export default function App() {
               {history.join(' ')}
             </div>
             <div>
-            <div className='flex flex-wrap items-center gap-1.5'>
-              {FACE_KEYS.map((f) => (
-                <Button
-                  key={f}
-                  variant='outline'
-                  size='sm'
-                  className='w-11 font-mono text-blue-500'
-                  onClick={() => doMove(f)}
-                >
-                  {f}
-                </Button>
-              ))}
+              <div className='flex flex-wrap items-center gap-1.5'>
+                {FACE_KEYS.map((f) => (
+                  <Button
+                    key={f}
+                    variant='outline'
+                    size='sm'
+                    className='w-11 font-mono text-blue-500'
+                    onClick={() => doMove(f)}
+                  >
+                    {f}
+                  </Button>
+                ))}
               </div>
               <div className='flex flex-wrap items-center gap-1.5'>
-              {FACE_KEYS.map((f) => (
-                <Button
-                  key={`${f}'`}
-                  variant='ghost'
-                  size='sm'
-                  className='w-11 font-mono'
-                  onClick={() => doMove(`${f}'`)}
-                >
-                  {f}&prime;
-                </Button>
-              ))}
+                {FACE_KEYS.map((f) => (
+                  <Button
+                    key={`${f}'`}
+                    variant='ghost'
+                    size='sm'
+                    className='w-11 font-mono'
+                    onClick={() => doMove(`${f}'`)}
+                  >
+                    {f}&prime;
+                  </Button>
+                ))}
               </div>
-              
+
               <Button variant='secondary' size='sm' onClick={scramble}>
                 打乱
               </Button>
@@ -486,7 +511,7 @@ export default function App() {
               </Button>
             </div>
             <p className='mt-2 text-xs text-zinc-600'>
-              键盘 U / D / L / R / F / B 转动对应面，按住 Shift 为逆时针（&prime;）
+              键盘 U / D / L / R / F / B / M / E / S 转动对应层，按住 Shift 为逆时针（&prime;）
             </p>
           </div>
         </section>
