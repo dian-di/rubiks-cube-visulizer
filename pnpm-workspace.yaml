@@ -1,3 +1,6 @@
+minimumReleaseAgeExclude:
+  - '@supabase/realtime-js@2.114.0'
+  - '@supabase/storage-js@2.114.0'
 onlyBuiltDependencies:
   - '@biomejs/biome'
   - '@tailwindcss/oxide'

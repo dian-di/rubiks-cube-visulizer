@@ -6,7 +6,7 @@ web-template is a React + TypeScript single-page application for {application}, 
 
 ## Tech Stack
 
-- **Framework:** React 19 + TypeScript 6 (latest stable)
+- **Framework:** React 19 + TypeScript 7 (latest stable)
 - **Build tool:** Vite 8
 - **Routing:** react-router-dom v7
 - **Styling:** Tailwind CSS v4 (via @tailwindcss/vite plugin)
