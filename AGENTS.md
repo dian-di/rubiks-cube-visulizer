@@ -44,7 +44,6 @@ web-template is a React + TypeScript single-page application for {application}, 
 
 ## Performance
 
-- Memoize expensive computations and callbacks (`useMemo`, `useCallback`, `React.memo`).
 - Lazy-load routes and heavy components with `React.lazy` + `Suspense`.
 - Avoid unnecessary re-renders; keep props stable or memoized.
 - Use efficient data structures and algorithms in visualization logic.
