@@ -24,6 +24,9 @@ declare module 'react' {
 }
 
 // ---------------------------------------------------------------- types
+// V3 / Pt / Sticker 描述 3D 魔方的逻辑状态：每个贴纸有整数格点坐标 pos
+// （各分量 ∈ {-1, 0, 1}）和面法向 normal。渲染与动画只消费 2D 投影 place(s)。
+
 type V3 = [number, number, number]
 type Axis = 0 | 1 | 2
 
@@ -39,17 +42,53 @@ interface Sticker {
   color: string
 }
 
+// ---- 两种插值路径（一次转动中每个受影响 dot 二选一） ----
+
+// 圆周弧插值：dot 起止点都落在该轴某条画出的同心圆上（r0≈r1≈RADII 之一），
+// 绕圆心做极坐标 (θ, r) 线性插值。r0≈r1 → 纯圆周运动。
+// theta1 已经过 directedCircleAngle 方向归一：同一层内所有 dot 绕行方向一致，
+// 且不会因 atan2 ±π 分支断裂而反向绕整圈。
+interface ArcDelta {
+  kind: 'arc'
+  theta0: number
+  r0: number
+  theta1: number
+  r1: number
+}
+
+// 直线插值：起止点不在同一画出的圆周上（典型为转动面的面内 dot，其投影
+// 从一条同心圆跳到另一条），极坐标插值会产生穿过图心的长螺旋——
+// 跨 ±π 分支时长达 226°~329°。所以直接在屏幕坐标系里直线平移到目标落点。
+interface LineDelta {
+  kind: 'line'
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
+// 一次转动的完整动画状态。
 interface AnimState {
+  // 代际计数：每开新动画 / reset 时自增。commit 前校验 gen === genRef.current，
+  // 防止已被 reset 作废的动画在 onComplete 回调里把旧状态提交回去。
   gen: number
+  // 本次转动的旋转轴（0/1/2 = X/Y/Z），决定绕哪个圆组转。
   axis: Axis
+  // 该轴圆组在屏幕上的圆心（极坐标插值的原点）。
   center: Pt
-  // 绕 center 的极坐标：θ/r 各自线性插值，v=1 严格落在 place(next)，
-  // 避免 motion CSS transform pipeline 的 transform-origin 覆盖问题。
-  deltas: Map<number, { theta0: number; r0: number; theta1: number; r1: number }>
+  // 受影响 dot 的插值参数，key = sticker id。
+  deltas: Map<number, ArcDelta | LineDelta>
+  // 转动结束后的贴纸逻辑状态，动画完成时由 commit 原子提交。
   next: Sticker[]
 }
 
 // ---------------------------------------------------------------- geometry
+// 同心圆投影的核心思想：
+//   贴纸的法向轴决定它「不属于」哪一组圆；其余两个坐标分量各决定它落在
+//   对应圆组的哪一条同心圆上。因此贴纸的 2D 落点 = 这两条圆的交点
+//   （见 place()）。转动某层时，该层贴纸沿所属轴圆组移动——侧面贴纸
+//   停留在同一条圆周上（arc），转动面内的贴纸则在圆组之间迁移（line）。
+//
 // 同心圆布局：Y 组在上方，X 组在右下、Z 组在左下。三个半径对应层坐标 -1/0/+1。
 // 注意：X/Z 与下排左右组的对应关系决定 Y 圆周上四个色簇的相位（蓝红绿橙，顺时针）。
 const CENTERS: readonly [Pt, Pt, Pt] = [
@@ -158,32 +197,39 @@ function rotVec(v: V3, axis: Axis, deg: number): V3 {
 }
 
 // 外层记号	对应中层记号	说明
-// L / R	M	Middle 层，方向与 L 一致
 // U / D	E	Equator 层，方向与 D 一致
+// L / R	M	Middle 层，方向与 L 一致
 // F / B	S	Standing 层，方向与 F 一致
 const FACE_MOVES: Record<string, { axis: Axis; layer: number; theta: number }> = {
   U: { axis: 1, layer: 1, theta: -90 },
   D: { axis: 1, layer: -1, theta: 90 },
-  R: { axis: 0, layer: 1, theta: -90 },
   L: { axis: 0, layer: -1, theta: 90 },
+  R: { axis: 0, layer: 1, theta: -90 },
   F: { axis: 2, layer: 1, theta: -90 },
   B: { axis: 2, layer: -1, theta: 90 },
   // 中层：M 同 L 方向（x=0），E 同 D 方向（y=0），S 同 F 方向（z=0）
-  M: { axis: 0, layer: 0, theta: 90 },
   E: { axis: 1, layer: 0, theta: 90 },
+  M: { axis: 0, layer: 0, theta: 90 },
   S: { axis: 2, layer: 0, theta: -90 },
 }
 
 const FACE_KEYS = Object.keys(FACE_MOVES)
 
-// 每个同心圆组在屏幕坐标系中的正向，与 3D 右手坐标系的正向并不完全相同。
+// 每个同心圆组在屏幕坐标系中的正向，与 3D 右手坐标系的正向并不相同。
 // 这个表把实际的层旋转角转换为屏幕上圆周 dot 应保持的统一方向。
-const SCREEN_TURN_ORIENTATION: readonly [number, number, number] = [1, -1, -1]
+// 实测（每个转动 12~13 个圆周 dot 的自然短弧方向多数派）：
+// U/F/R 顺时针、D/L/B 逆时针 → 三个轴均为 -1。
+const SCREEN_TURN_ORIENTATION: readonly [number, number, number] = [-1, -1, -1]
 const TAU = Math.PI * 2
 
 function directedCircleAngle(theta0: number, theta1: number, direction: number): number {
-  // atan2 在 -π/π 处断开。先取得最短的几何弧，再把它展开到本次转动的统一方向；
-  // 这样同一圆周上的 dot 不会仅因跨越分支而反向。
+  // atan2 在 -π/π 处断开，两个几乎相邻的角度可能差出 ~2π。
+  // 三步归一：
+  //   1. 把角差折叠到 (-π, π]（最短几何弧）；
+  //   2. 若最短弧方向与本次转动的统一方向（direction，+1/-1）相反，
+  //      加减一整圈 2π 展开到正确方向；
+  //   3. 角差为 0 时保持原角度，避免方向修正引入 ±TAU 的假转动。
+  // 这样同一圆周上的 dot 不会仅因跨越 ±π 分支而反向，也不会绕远圈。
   let delta = ((((theta1 - theta0 + Math.PI) % TAU) + TAU) % TAU) - Math.PI
   if (Math.abs(delta) < 1e-9) return theta0
   if (delta * direction < 0) delta += direction * TAU
@@ -215,10 +261,21 @@ function CircleGroup({ axis }: { axis: Axis }) {
   )
 }
 
-// 沿所在圆周转动：把 dot 的 cx/cy 当作运动属性绑定到 motion.circle，
-// 绕轴心用极坐标 (θ, r) 线性插值。motion 对 SVG 属性走 setAttribute，
-// 完全绕开 CSS transform 管线（曾被其 transform-origin 强写 50% 50% 坑过）。
-// 侧面 dots r0=r1 → 纯圆周；面内 dots 几何上必须螺旋，v=1 精确落点。
+// 单个贴纸 dot 的渲染与逐帧位置计算。
+//
+// 位置来源按优先级：
+//   1. 无动画（animRef.current 为空）→ 静态落点 place(s)；
+//   2. delta 为 line  → 屏幕坐标直线插值（面内 dot，跨圆组迁移）；
+//   3. delta 为 arc   → 绕圆心极坐标 (θ, r) 插值（侧面 dot，纯圆周运动，
+//                       r0≈r1，θ 已方向归一见 ArcDelta）。
+//
+// 实现细节：
+//   - cx/cy 不是 state 而是 useTransform(progress)：progress 每帧变化时
+//     motion 自动重算并 setAttribute，React 不参与逐帧渲染。
+//   - useTransform 闭包里读 animRef.current（ref 而非 state），拿到的
+//     永远是当前代动画的 deltas；动画切换由外层重置 progress 触发重算。
+//   - motion 对 SVG 属性走 setAttribute，完全绕开 CSS transform 管线
+//     （曾被其 transform-origin 强写 50% 50% 坑过）。
 function StickerDot({
   s,
   progress,
@@ -228,11 +285,15 @@ function StickerDot({
   progress: MotionValue<number>
   animRef: RefObject<AnimState | null>
 }) {
+  // 静态落点：仅在无动画时使用（动画期间由 delta 接管坐标）。
   const p = useMemo(() => place(s), [s])
   const cxMV = useTransform(progress, (v) => {
     const a = animRef.current
     const d = a?.deltas.get(s.id)
     if (!a || !d) return p?.x ?? 0
+    // 直线分支：直接在笛卡尔坐标上线性插值。
+    if (d.kind === 'line') return d.x0 + (d.x1 - d.x0) * v
+    // 圆弧分支：r、θ 各自线性插值（θ 已归一，差值即真实扫过角度）。
     const r = d.r0 + (d.r1 - d.r0) * v
     const t = d.theta0 + (d.theta1 - d.theta0) * v
     return a.center.x + r * Math.cos(t)
@@ -241,6 +302,7 @@ function StickerDot({
     const a = animRef.current
     const d = a?.deltas.get(s.id)
     if (!a || !d) return p?.y ?? 0
+    if (d.kind === 'line') return d.y0 + (d.y1 - d.y0) * v
     const r = d.r0 + (d.r1 - d.r0) * v
     const t = d.theta0 + (d.theta1 - d.theta0) * v
     return a.center.y + r * Math.sin(t)
@@ -261,15 +323,22 @@ function StickerDot({
 const TURN_MS = 420
 
 export default function App() {
+  // ---- 运行时状态：React state（触发渲染）+ ref（逐帧/跨回调同步读）双轨 ----
   const [stickers, setStickers] = useState<Sticker[]>(initStickers)
   const [anim, setAnim] = useState<AnimState | null>(null)
   const [history, setHistory] = useState<string[]>([])
+  // 贴纸逻辑状态的即时镜像：pump/commit 里同步读，不等 re-render。
   const stickersRef = useRef(stickers)
+  // 当前动画的即时镜像：useTransform 逐帧读 deltas。
   const animRef = useRef<AnimState | null>(null)
+  // 动画门闩：true = 有动画在跑，pump 据此串行化队列。
   const busyRef = useRef(false)
+  // 待执行转动队列（doMove 入队、pump 出队）。
   const queueRef = useRef<string[]>([])
+  // 动画代际计数：pump 自增、reset 自增，commit 用它作废在途的旧回调。
   const genRef = useRef(0)
   const playerRef = useRef<HTMLElement | null>(null)
+  // 全局动画进度 0→1：唯一的逐帧驱动源，所有 dot 位置都是它的 transform。
   const progress = useMotionValue(0)
   animRef.current = anim
 
@@ -307,14 +376,20 @@ export default function App() {
     })
   }, [getPlayerReady])
 
+  // 消费转动队列：同一时刻只允许一个动画在跑（busyRef 门闩），
+  // 其余请求留在 queueRef 里由 commit → pump 链式接力。
   const pump = useCallback(() => {
     if (busyRef.current || queueRef.current.length === 0) return
     const face = queueRef.current.shift()!
     const m = FACE_MOVES[face[0]]
+    // 撇号（prime）= 逆时针，取反该面的基准转角。
     const turnTheta = face.endsWith("'") ? -m.theta : m.theta
+    // 层旋转角 → 屏幕圆周方向的映射：SCREEN_TURN_ORIENTATION 见其定义处注释。
     const screenDirection = Math.sign(turnTheta) * SCREEN_TURN_ORIENTATION[m.axis]
     busyRef.current = true
     const cur = stickersRef.current
+    // 预计算转动后的贴纸状态（动画期间仅作为 delta 的终点，commit 时才提交）。
+    // 层判断用严格整数比较（pos[axis] === layer），rotVec 的整数化保证无浮点残差。
     const next = cur.map((s) =>
       s.pos[m.axis] === m.layer
         ? {
@@ -325,44 +400,63 @@ export default function App() {
         : s,
     )
     const center = CENTERS[m.axis]
-    const deltas = new Map<number, { theta0: number; r0: number; theta1: number; r1: number }>()
+    const deltas = new Map<number, ArcDelta | LineDelta>()
+    // 只有起止都在画出的同心圆（r∈RADII）上的 dot 才做圆周运动；
+    // 面内 dot（含 r0 数值上等于 r1 但不在任何画出的圆上的情况）直接平移。
+    // 双重条件缺一不可：仅判 r0≈r1 会把「碰巧等半径的跨圆组迁移」误判为圆周。
+    const onDrawnCircle = (r: number) => RADII.some((rad) => Math.abs(r - rad) < 0.5)
     for (let i = 0; i < cur.length; i++) {
+      // 只处理该层的贴纸；其他层的落点在动画期间不变（走静态 place 分支）。
       if (cur[i].pos[m.axis] !== m.layer) continue
       const p0 = place(cur[i])
       const p1 = place(next[i])
       if (!p0 || !p1) continue
-      const dx0 = p0.x - center.x
-      const dy0 = p0.y - center.y
-      const dx1 = p1.x - center.x
-      const dy1 = p1.y - center.y
-      const r0 = Math.hypot(dx0, dy0)
-      const r1 = Math.hypot(dx1, dy1)
-      const theta0 = Math.atan2(dy0, dx0)
-      const theta1 = Math.atan2(dy1, dx1)
-      deltas.set(cur[i].id, {
-        theta0,
-        r0,
-        // 半径不变才是同一个圆周上的 dot；螺旋运动保持其原本的几何落点插值。
-        theta1:
-          Math.abs(r0 - r1) < 1e-6 ? directedCircleAngle(theta0, theta1, screenDirection) : theta1,
-        r1,
-      })
+      const r0 = Math.hypot(p0.x - center.x, p0.y - center.y)
+      const r1 = Math.hypot(p1.x - center.x, p1.y - center.y)
+      if (Math.abs(r0 - r1) < 1e-6 && onDrawnCircle(r0)) {
+        // 侧面 dot：起止同圆 → 圆周弧。theta1 做方向归一，
+        // 保证整层 12 个 dot 绕行方向一致、不跨 ±π 分支。
+        const theta0 = Math.atan2(p0.y - center.y, p0.x - center.x)
+        const theta1 = Math.atan2(p1.y - center.y, p1.x - center.x)
+        deltas.set(cur[i].id, {
+          kind: 'arc',
+          theta0,
+          r0,
+          theta1: directedCircleAngle(theta0, theta1, screenDirection),
+          r1,
+        })
+      } else {
+        // 面内 dot：起止不同圆（或不在画出的圆上）→ 直线直达目标落点。
+        deltas.set(cur[i].id, {
+          kind: 'line',
+          x0: p0.x,
+          y0: p0.y,
+          x1: p1.x,
+          y1: p1.y,
+        })
+      }
     }
     const st: AnimState = {
+      // 新代际：作废任何仍在途的旧动画回调（见 commit 的 gen 校验）。
       gen: ++genRef.current,
       axis: m.axis,
       center,
       deltas,
       next,
     }
+    // ref 与 state 双写：ref 供 useTransform 逐帧读取（同步、无重渲染），
+    // state 触发下方 useEffect 启动 progress 动画。
     animRef.current = st
     setAnim(st)
     setHistory((h) => [...h.slice(-23), face])
+    // 3D 播放器同步播放同一手（异步，不阻塞 2D 动画）。
     syncPlayerMove(face)
   }, [syncPlayerMove])
 
+  // 动画完成：把预计算的 next 原子提交为当前状态，然后接力队列里的下一手。
   const commit = useCallback(() => {
     const st = animRef.current
+    // gen 不匹配 = 这份动画已被 reset 作废（或被新动画取代），丢弃即可。
     if (!st || st.gen !== genRef.current) {
       busyRef.current = false
       return
@@ -380,6 +474,8 @@ export default function App() {
     // 强迫 cx/cy motion value 用最新的 place(s) 重算，避免 commit 后残值。
     progress.set(0)
     if (!anim) return
+    // progress 0→1 驱动所有 delta 插值；onComplete 走 commit 而非 setState 落点，
+    // 保证「动画帧」与「状态提交」严格串行。卸载/换代时 stop() 中断旧动画。
     const controls = animate(progress, 1, {
       duration: TURN_MS / 1000,
       ease: [0.45, 0.05, 0.2, 1],
@@ -388,6 +484,7 @@ export default function App() {
     return () => controls.stop()
   }, [anim, commit, progress])
 
+  // 转动入口：入队（上限 24 手防连按堆积）后尝试立即开跑。
   const doMove = useCallback(
     (face: string) => {
       if (queueRef.current.length > 24) return
@@ -397,6 +494,7 @@ export default function App() {
     [pump],
   )
 
+  // 打乱：随机 20 手入队，pump 链会依次串行执行。
   const scramble = useCallback(() => {
     for (let i = 0; i < 20; i++) {
       const f = FACE_KEYS[Math.floor(Math.random() * FACE_KEYS.length)]
@@ -405,6 +503,7 @@ export default function App() {
     pump()
   }, [pump])
 
+  // 复位：清队列 + bump 代际（作废在途动画的 commit）+ 回到初始状态。
   const reset = useCallback(() => {
     queueRef.current = []
     genRef.current++
@@ -464,7 +563,7 @@ export default function App() {
         <section className='flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900'>
           <div className='min-h-0 flex-1'>
             <twisty-player
-              alg="R U R' U' R' F R2 U' R' U' R U R' F'"
+              alg=''
               ref={playerRef}
               // 不要加 block：cubing 依赖宿主元素的 display:grid 让 shadow root 的根节点撑满高度。
               className='h-full w-full'
