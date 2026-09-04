@@ -238,22 +238,33 @@ function directedCircleAngle(theta0: number, theta1: number, direction: number):
 
 // ---------------------------------------------------------------- svg parts
 // 同心圆与轴标：静态参考系，永远不旋转；只有 dots 动。
-function CircleGroup({ axis }: { axis: Axis }) {
+function CircleGroup({
+  axis,
+  highlight,
+}: {
+  axis: Axis
+  highlight: { axis: Axis; layer: number } | null
+}) {
   const center = CENTERS[axis]
+  // 本次高亮命中的半径：仅当高亮落在当前轴组、且半径等于该层半径时才点亮。
+  const hlRadius = highlight && highlight.axis === axis ? R(highlight.layer) : null
   return (
     <g>
-      {RADII.map((r) => (
-        <g key={r}>
-          <circle
-            cx={center.x}
-            cy={center.y}
-            r={r}
-            fill='none'
-            stroke='#3f3f46'
-            strokeWidth={1.3}
-          />
-        </g>
-      ))}
+      {RADII.map((r) => {
+        const active = hlRadius === r
+        return (
+          <g key={r}>
+            <circle
+              cx={center.x}
+              cy={center.y}
+              r={r}
+              fill='none'
+              stroke={active ? '#f4f400' : '#3f3f46'}
+              strokeWidth={active ? 4 : 2}
+            />
+          </g>
+        )
+      })}
       <text x={center.x - 5} y={center.y + 5} fill='#ffffff' fontSize={18} fontWeight={600}>
         {AXIS_NAMES[axis]}
       </text>
@@ -327,6 +338,8 @@ export default function App() {
   const [stickers, setStickers] = useState<Sticker[]>(initStickers)
   const [anim, setAnim] = useState<AnimState | null>(null)
   const [history, setHistory] = useState<string[]>([])
+  // 当前正在转动的圆周高亮（轴组 + 层）。pump 开转时点亮、队列清空/复位时消除。
+  const [highlight, setHighlight] = useState<{ axis: Axis; layer: number } | null>(null)
   // 贴纸逻辑状态的即时镜像：pump/commit 里同步读，不等 re-render。
   const stickersRef = useRef(stickers)
   // 当前动画的即时镜像：useTransform 逐帧读 deltas。
@@ -379,7 +392,12 @@ export default function App() {
   // 消费转动队列：同一时刻只允许一个动画在跑（busyRef 门闩），
   // 其余请求留在 queueRef 里由 commit → pump 链式接力。
   const pump = useCallback(() => {
-    if (busyRef.current || queueRef.current.length === 0) return
+    if (busyRef.current) return
+    // 队列已空且无动画在跑 → 无「当前圆周」，消除高亮。
+    if (queueRef.current.length === 0) {
+      setHighlight(null)
+      return
+    }
     const face = queueRef.current.shift()!
     const m = FACE_MOVES[face[0]]
     // 撇号（prime）= 逆时针，取反该面的基准转角。
@@ -387,6 +405,8 @@ export default function App() {
     // 层旋转角 → 屏幕圆周方向的映射：SCREEN_TURN_ORIENTATION 见其定义处注释。
     const screenDirection = Math.sign(turnTheta) * SCREEN_TURN_ORIENTATION[m.axis]
     busyRef.current = true
+    // 点亮本次转动所在的圆周：该面所在轴组里、对应层半径的那条圆。
+    setHighlight({ axis: m.axis, layer: m.layer })
     const cur = stickersRef.current
     // 预计算转动后的贴纸状态（动画期间仅作为 delta 的终点，commit 时才提交）。
     // 层判断用严格整数比较（pos[axis] === layer），rotVec 的整数化保证无浮点残差。
@@ -451,7 +471,7 @@ export default function App() {
     setHistory((h) => [...h.slice(-23), face])
     // 3D 播放器同步播放同一手（异步，不阻塞 2D 动画）。
     syncPlayerMove(face)
-  }, [syncPlayerMove])
+  }, [syncPlayerMove, setHighlight])
 
   // 动画完成：把预计算的 next 原子提交为当前状态，然后接力队列里的下一手。
   const commit = useCallback(() => {
@@ -507,6 +527,7 @@ export default function App() {
   const reset = useCallback(() => {
     queueRef.current = []
     genRef.current++
+    setHighlight(null)
     const fresh = initStickers()
     stickersRef.current = fresh
     setStickers(fresh)
@@ -623,7 +644,7 @@ export default function App() {
             className='h-full w-full'
           >
             {([0, 1, 2] as Axis[]).map((a) => (
-              <CircleGroup key={a} axis={a} />
+              <CircleGroup key={a} axis={a} highlight={highlight} />
             ))}
             {dots}
           </svg>
