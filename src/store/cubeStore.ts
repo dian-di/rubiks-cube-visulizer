@@ -1,5 +1,5 @@
 // 魔方全局 store：持有贴纸逻辑状态 + 动画状态，并暴露引擎动作
-// （pump / commit / doMove / scramble / reset）。多组件通过本 store 共享消息，
+// （pump / commit / doMove / scramble / reset / setOrder）。多组件通过本 store 共享消息，
 // 不再层层透传 props。逐帧同步所需的引用（stickersRef / busyRef / queueRef /
 // genRef / animRef）以模块级变量持有——store 是单例，生命周期与 App 一致。
 
@@ -7,13 +7,14 @@ import { create } from 'zustand'
 import {
   initStickers,
   rotVec,
-  FACE_MOVES,
-  FACE_KEYS,
+  ORDER_GEOMS,
+  faceKeysFor,
   SCREEN_TURN_ORIENTATION,
   directedCircleAngle,
   CENTERS,
-  RADII,
   place,
+  type CubeOrder,
+  type OrderGeom,
   type Sticker,
   type Axis,
   type AnimState,
@@ -23,15 +24,16 @@ import {
 
 export interface CubeState {
   // ---- 响应式状态（驱动渲染） ----
+  order: CubeOrder
   stickers: Sticker[]
   anim: AnimState | null
   history: string[]
-  highlight: { axis: Axis; layer: number } | null
+  highlight: { axis: Axis; layers: number[] } | null
   // ---- 3D 播放器事件（计数式，避免连续同手被 React 合并） ----
   // 每次转动递增 moveToken；TwistyPlayerView 据此播放 lastMove。
   lastMove: string
   moveToken: number
-  // reset 时递增 playerClearToken，让播放器清空 alg。
+  // reset / 切阶时递增 playerClearToken，让播放器清空 alg 并按当前阶重建。
   playerClearToken: number
   // ---- 引擎动作 ----
   pump: () => void
@@ -39,11 +41,12 @@ export interface CubeState {
   doMove: (face: string) => void
   scramble: () => void
   reset: () => void
+  setOrder: (order: CubeOrder) => void
 }
 
 // ---------------------------------------------------------------- 引擎引用
 // 非响应式可变引用：逐帧 / 跨回调同步读取，避免 re-render 抖动。
-let stickersRef: Sticker[] = initStickers()
+let stickersRef: Sticker[] = initStickers(3)
 let busyRef = false
 let queueRef: string[] = []
 let genRef = 0
@@ -51,7 +54,8 @@ let animRef: AnimState | null = null
 
 // ---------------------------------------------------------------- store
 export const useCubeStore = create<CubeState>((set, get) => ({
-  stickers: initStickers(),
+  order: 3,
+  stickers: initStickers(3),
   anim: null,
   history: [],
   highlight: null,
@@ -68,20 +72,21 @@ export const useCubeStore = create<CubeState>((set, get) => ({
       set({ highlight: null })
       return
     }
+    const geom: OrderGeom = ORDER_GEOMS[get().order]
     const face = queueRef.shift()!
-    const m = FACE_MOVES[face[0]]
+    const m = geom.faceMoves[face[0]]
     // 撇号（prime）= 逆时针，取反该面的基准转角。
     const turnTheta = face.endsWith("'") ? -m.theta : m.theta
     // 层旋转角 → 屏幕圆周方向的映射：SCREEN_TURN_ORIENTATION 见其定义处注释。
     const screenDirection = Math.sign(turnTheta) * SCREEN_TURN_ORIENTATION[m.axis]
     busyRef = true
-    // 点亮本次转动所在的圆周：该面所在轴组里、对应层半径的那条圆。
-    set({ highlight: { axis: m.axis, layer: m.layer } })
+    // 点亮本次转动所在的圆周：该面所在轴组里、对应所有层半径的圆（宽转动含两层）。
+    set({ highlight: { axis: m.axis, layers: m.layers } })
     const cur = stickersRef
     // 预计算转动后的贴纸状态（动画期间仅作为 delta 的终点，commit 时才提交）。
-    // 层判断用严格整数比较（pos[axis] === layer），rotVec 的整数化保证无浮点残差。
+    // 层判断用严格整数比较（pos[axis] ∈ layers），rotVec 的整数化保证无浮点残差。
     const next = cur.map((s) =>
-      s.pos[m.axis] === m.layer
+      m.layers.includes(s.pos[m.axis])
         ? {
             ...s,
             pos: rotVec(s.pos, m.axis, turnTheta),
@@ -91,15 +96,15 @@ export const useCubeStore = create<CubeState>((set, get) => ({
     )
     const center = CENTERS[m.axis]
     const deltas = new Map<number, ArcDelta | LineDelta>()
-    // 只有起止都在画出的同心圆（r∈RADII）上的 dot 才做圆周运动；
+    // 只有起止都在画出的同心圆（r∈geom.radii）上的 dot 才做圆周运动；
     // 面内 dot（含 r0 数值上等于 r1 但不在任何画出的圆上的情况）直接平移。
     // 双重条件缺一不可：仅判 r0≈r1 会把「碰巧等半径的跨圆组迁移」误判为圆周。
-    const onDrawnCircle = (r: number) => RADII.some((rad) => Math.abs(r - rad) < 0.5)
+    const onDrawnCircle = (r: number) => geom.radii.some((rad) => Math.abs(r - rad) < 0.5)
     for (let i = 0; i < cur.length; i++) {
       // 只处理该层的贴纸；其他层的落点在动画期间不变（走静态 place 分支）。
-      if (cur[i].pos[m.axis] !== m.layer) continue
-      const p0 = place(cur[i])
-      const p1 = place(next[i])
+      if (!m.layers.includes(cur[i].pos[m.axis])) continue
+      const p0 = place(cur[i], geom)
+      const p1 = place(next[i], geom)
       if (!p0 || !p1) continue
       const r0 = Math.hypot(p0.x - center.x, p0.y - center.y)
       const r1 = Math.hypot(p1.x - center.x, p1.y - center.y)
@@ -146,7 +151,7 @@ export const useCubeStore = create<CubeState>((set, get) => ({
   // 动画完成：把预计算的 next 原子提交为当前状态，然后接力队列里的下一手。
   commit: () => {
     const st = animRef
-    // gen 不匹配 = 这份动画已被 reset 作废（或被新动画取代），丢弃即可。
+    // gen 不匹配 = 这份动画已被 reset / 切阶作废（或被新动画取代），丢弃即可。
     if (!st || st.gen !== genRef) {
       busyRef = false
       return
@@ -165,24 +170,45 @@ export const useCubeStore = create<CubeState>((set, get) => ({
     get().pump()
   },
 
-  // 打乱：随机 20 手入队，pump 链会依次串行执行。
+  // 打乱：随机 20 手入队，pump 链会依次串行执行（仅用当前阶支持的记号）。
   scramble: () => {
+    const keys = faceKeysFor(get().order)
     for (let i = 0; i < 20; i++) {
-      const f = FACE_KEYS[Math.floor(Math.random() * FACE_KEYS.length)]
+      const f = keys[Math.floor(Math.random() * keys.length)]
       queueRef.push(Math.random() < 0.5 ? f : `${f}'`)
     }
     get().pump()
   },
 
-  // 复位：清队列 + bump 代际（作废在途动画的 commit）+ 回到初始状态。
+  // 复位：清队列 + bump 代际（作废在途动画的 commit）+ 回到当前阶初始状态。
   reset: () => {
     queueRef = []
     genRef++
-    const fresh = initStickers()
+    const fresh = initStickers(get().order)
     stickersRef = fresh
     animRef = null
     busyRef = false
     set((s) => ({
+      stickers: fresh,
+      anim: null,
+      highlight: null,
+      history: [],
+      playerClearToken: s.playerClearToken + 1,
+    }))
+  },
+
+  // 切换阶数：清队列 + bump 代际 + 用目标阶重建贴纸状态，并通知 3D 播放器重建。
+  // 物理魔方的阶是结构性属性，无法「原地变换」，因此统一走「重建 + 清屏」。
+  setOrder: (order) => {
+    if (order === get().order) return
+    queueRef = []
+    genRef++
+    const fresh = initStickers(order)
+    stickersRef = fresh
+    animRef = null
+    busyRef = false
+    set((s) => ({
+      order,
       stickers: fresh,
       anim: null,
       highlight: null,

@@ -8,10 +8,11 @@ import type { MotionValue } from 'motion/react'
 import { useCubeStore } from '@/store/cubeStore'
 import {
   CENTERS,
-  RADII,
-  R,
   AXIS_NAMES,
+  ORDER_GEOMS,
+  radiusForLevel,
   place,
+  type OrderGeom,
   type Sticker,
   type Axis,
 } from '@/lib/cube'
@@ -19,14 +20,24 @@ import {
 const TURN_MS = 420
 
 // 同心圆与轴标：静态参考系，永远不旋转；只有 dots 动。
-function CircleGroup({ axis, highlight }: { axis: Axis; highlight: { axis: Axis; layer: number } | null }) {
+function CircleGroup({
+  axis,
+  highlight,
+  geom,
+}: {
+  axis: Axis
+  highlight: { axis: Axis; layers: number[] } | null
+  geom: OrderGeom
+}) {
   const center = CENTERS[axis]
-  // 本次高亮命中的半径：仅当高亮落在当前轴组、且半径等于该层半径时才点亮。
-  const hlRadius = highlight && highlight.axis === axis ? R(highlight.layer) : null
+  // 本次高亮命中的半径集合：仅当高亮落在当前轴组、且半径等于某层半径时点亮。
+  // 宽转动（两层）会同时点亮两条同心圆。
+  const hlRadii =
+    highlight && highlight.axis === axis ? highlight.layers.map((l) => radiusForLevel(geom, l)) : []
   return (
     <g>
-      {RADII.map((r) => {
-        const active = hlRadius === r
+      {geom.radii.map((r) => {
+        const active = hlRadii.includes(r)
         return (
           <g key={r}>
             <circle
@@ -62,9 +73,17 @@ function CircleGroup({ axis, highlight }: { axis: Axis; highlight: { axis: Axis;
 //     永远是当前代动画的 deltas；动画切换由外层重置 progress 触发重算。
 //   - motion 对 SVG 属性走 setAttribute，完全绕开 CSS transform 管线
 //     （曾被其 transform-origin 强写 50% 50% 坑过）。
-function StickerDot({ s, progress }: { s: Sticker; progress: MotionValue<number> }) {
+function StickerDot({
+  s,
+  progress,
+  geom,
+}: {
+  s: Sticker
+  progress: MotionValue<number>
+  geom: OrderGeom
+}) {
   // 静态落点：仅在无动画时使用（动画期间由 delta 接管坐标）。
-  const p = useMemo(() => place(s), [s])
+  const p = useMemo(() => place(s, geom), [s, geom])
   const cxMV = useTransform(progress, (v) => {
     const a = useCubeStore.getState().anim
     const d = a?.deltas.get(s.id)
@@ -85,11 +104,13 @@ function StickerDot({ s, progress }: { s: Sticker; progress: MotionValue<number>
     const t = d.theta0 + (d.theta1 - d.theta0) * v
     return a.center.y + r * Math.sin(t)
   })
+  // 贴纸半径随阶数自适应：4 阶贴纸更多、更密，略缩小避免视觉粘连（中心重叠已靠 radii 拉开）。
+  const dotR = geom.order === 4 ? 4.5 : 5.5
   return (
     <motion.circle
       cx={cxMV}
       cy={cyMV}
-      r={5.5}
+      r={dotR}
       fill={s.color}
       stroke='rgba(0,0,0,0.4)'
       strokeWidth={1}
@@ -102,6 +123,8 @@ export function ConcentricCircle() {
   const anim = useCubeStore((s) => s.anim)
   const highlight = useCubeStore((s) => s.highlight)
   const commit = useCubeStore((s) => s.commit)
+  const order = useCubeStore((s) => s.order)
+  const geom = ORDER_GEOMS[order]
   // 全局动画进度 0→1：唯一的逐帧驱动源，所有 dot 位置都是它的 transform。
   const progress = useMotionValue(0)
 
@@ -120,12 +143,12 @@ export function ConcentricCircle() {
     return () => controls.stop()
   }, [anim, commit, progress])
 
-  const dots = stickers.map((s) => <StickerDot key={s.id} s={s} progress={progress} />)
+  const dots = stickers.map((s) => <StickerDot key={s.id} s={s} progress={progress} geom={geom} />)
 
   return (
     <svg viewBox='0 0 500 460' role='img' aria-label='魔方同心圆投影图' className='h-full w-full'>
       {([0, 1, 2] as Axis[]).map((a) => (
-        <CircleGroup key={a} axis={a} highlight={highlight} />
+        <CircleGroup key={a} axis={a} highlight={highlight} geom={geom} />
       ))}
       {dots}
     </svg>
