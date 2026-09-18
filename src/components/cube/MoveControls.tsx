@@ -2,8 +2,8 @@
 // 全部通过全局 store 的引擎动作触发，组件自身不持有任何魔方状态。
 
 import { Button } from '@/components/ui/button'
-import { useCubeStore } from '@/store/cubeStore'
 import { faceKeysFor } from '@/lib/cube'
+import { useCubeStore } from '@/store/cubeStore'
 
 export function MoveControls() {
   const history = useCubeStore((s) => s.history)

@@ -2,20 +2,20 @@
 // 本组件持有全局唯一的 progress MotionValue，并负责驱动一次转动的逐帧动画；
 // dots 的位置全部是 progress 的 transform，React 不参与逐帧渲染。
 
-import { useEffect, useMemo } from 'react'
-import { animate, motion, useMotionValue, useTransform } from 'motion/react'
 import type { MotionValue } from 'motion/react'
-import { useCubeStore } from '@/store/cubeStore'
+import { animate, motion, useMotionValue, useTransform } from 'motion/react'
+import { useEffect, useMemo } from 'react'
 import {
-  CENTERS,
   AXIS_NAMES,
-  ORDER_GEOMS,
-  radiusForLevel,
-  place,
-  type OrderGeom,
-  type Sticker,
   type Axis,
+  CENTERS,
+  ORDER_GEOMS,
+  type OrderGeom,
+  place,
+  radiusForLevel,
+  type Sticker,
 } from '@/lib/cube'
+import { useCubeStore } from '@/store/cubeStore'
 
 const TURN_MS = 420
 

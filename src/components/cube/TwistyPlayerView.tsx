@@ -2,7 +2,6 @@
 // moveToken / playerClearToken 事件与 2D 同心圆投影实时同步播放同一手转动。
 
 import { useEffect, useRef } from 'react'
-import type * as React from 'react'
 import 'cubing/twisty'
 import { useCubeStore } from '@/store/cubeStore'
 
